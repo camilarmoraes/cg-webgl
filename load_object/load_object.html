@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { width: 100vw; height: 100vh; display: block; }
+        #debug {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 10px;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body onload="iniciar()">
+    <canvas id="webgl-canvas"></canvas>
+    <div id="debug"></div>
+
+    <script type="x-shader/x-vertex" id="vertex-shader">
+        attribute vec3 aPosition;
+        attribute vec3 aNormal;
+        
+        uniform mat4 uModelViewMatrix;
+        uniform mat4 uProjectionMatrix;
+        uniform vec3 uScale;
+        
+        varying vec3 vNormal;
+        
+        void main() {
+            vec3 scaledPosition = aPosition * uScale;
+            vNormal = aNormal;
+            gl_Position = uProjectionMatrix * uModelViewMatrix * vec4(scaledPosition, 1.0);
+        }
+    </script>
+
+    <script type="x-shader/x-fragment" id="fragment-shader">
+        precision mediump float;
+        varying vec3 vNormal;
+        
+        void main() {
+            vec3 light = normalize(vec3(1.0, 1.0, 1.0));
+            float intensity = max(dot(normalize(vNormal), light), 0.0);
+            vec3 color = vec3(0.2, 0.6, 0.3);
+            gl_FragColor = vec4(color * (intensity * 0.7 + 0.3), 1.0);
+        }
+    </script>
+
+    <script>
+        let gl;
+        let programa;
+        let scale = 0.5;
+        let cameraZ = -5; // Aumentado para afastar a câmera
+        let rotationX = Math.PI / 2; // Rotação inicial de 90 graus no eixo X
+        let rotationY = 0;
+
+        async function carregarOBJ(url) {
+            const response = await fetch(url);
+            const texto = await response.text();
+            
+            const vertices = [];
+            const normais = [];
+            const indices = [];
+            const verticesTemp = [];
+            const normaisTemp = [];
+            
+            const linhas = texto.split('\n');
+            
+            // Debug info
+            document.getElementById('debug').innerHTML = `Carregando arquivo OBJ...<br>`;
+            
+            for (let linha of linhas) {
+                linha = linha.trim();
+                const partes = linha.split(/\s+/);
+                
+                if (partes[0] === 'v') {
+                    verticesTemp.push([
+                        parseFloat(partes[1] || 0),
+                        parseFloat(partes[2] || 0),
+                        parseFloat(partes[3] || 0)
+                    ]);
+                }
+                else if (partes[0] === 'vn') {
+                    normaisTemp.push([
+                        parseFloat(partes[1] || 0),
+                        parseFloat(partes[2] || 0),
+                        parseFloat(partes[3] || 0)
+                    ]);
+                }
+            }
+
+            if (normaisTemp.length === 0) {
+                for (let i = 0; i < verticesTemp.length; i++) {
+                    normaisTemp.push([0, 1, 0]);
+                }
+            }
+
+            let indexVerticeAtual = 0;
+            const mapVertices = new Map();
+
+            for (let linha of linhas) {
+                linha = linha.trim();
+                const partes = linha.split(/\s+/);
+                
+                if (partes[0] === 'f') {
+                    for (let i = 1; i <= 3; i++) {
+                        const verticeIndices = partes[i].split('/');
+                        let verticeIndex = parseInt(verticeIndices[0]) - 1;
+                        let normalIndex = verticeIndices.length >= 3 ? parseInt(verticeIndices[2]) - 1 : verticeIndex;
+
+                        verticeIndex = Math.max(0, Math.min(verticeIndex, verticesTemp.length - 1));
+                        normalIndex = Math.max(0, Math.min(normalIndex, normaisTemp.length - 1));
+
+                        const chave = `${verticeIndex}/${normalIndex}`;
+                        
+                        if (!mapVertices.has(chave)) {
+                            vertices.push(...verticesTemp[verticeIndex]);
+                            normais.push(...normaisTemp[normalIndex]);
+                            mapVertices.set(chave, indexVerticeAtual);
+                            indices.push(indexVerticeAtual);
+                            indexVerticeAtual++;
+                        } else {
+                            indices.push(mapVertices.get(chave));
+                        }
+                    }
+                }
+            }
+
+            if (vertices.length === 0) {
+                throw new Error("Nenhum vértice encontrado no arquivo OBJ");
+            }
+
+            // Encontrar limites do modelo
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
+            let minZ = Infinity, maxZ = -Infinity;
+
+            for (let i = 0; i < vertices.length; i += 3) {
+                minX = Math.min(minX, vertices[i]);
+                maxX = Math.max(maxX, vertices[i]);
+                minY = Math.min(minY, vertices[i + 1]);
+                maxY = Math.max(maxY, vertices[i + 1]);
+                minZ = Math.min(minZ, vertices[i + 2]);
+                maxZ = Math.max(maxZ, vertices[i + 2]);
+            }
+
+            // Calcular escala apropriada
+            const width = maxX - minX;
+            const height = maxY - minY;
+            const depth = maxZ - minZ;
+            const maxDim = Math.max(width, height, depth);
+            scale = 2.0 / maxDim; // Ajusta o modelo para caber em um cubo 2x2
+
+            // Debug info
+            document.getElementById('debug').innerHTML += `Dimensões: ${width.toFixed(2)} x ${height.toFixed(2)} x ${depth.toFixed(2)}<br>`;
+            document.getElementById('debug').innerHTML += `Escala automática: ${scale.toFixed(2)}<br>`;
+            
+            return {
+                vertices: new Float32Array(vertices),
+                normais: new Float32Array(normais),
+                indices: new Uint16Array(indices)
+            };
+        }
+
+        async function iniciar() {
+            const canvas = document.getElementById("webgl-canvas");
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            
+            gl = canvas.getContext("webgl");
+            if (!gl) {
+                alert("WebGL não está disponível");
+                return;
+            }
+
+            gl.clearColor(0.8, 0.9, 1.0, 1.0);
+            gl.enable(gl.DEPTH_TEST);
+            gl.viewport(0, 0, canvas.width, canvas.height);
+
+            programa = criarPrograma();
+            gl.useProgram(programa);
+
+            try {
+                const modeloArvore = await carregarOBJ('batarang.obj');
+                console.log("Modelo carregado:", modeloArvore);
+
+                const vertexBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, modeloArvore.vertices, gl.STATIC_DRAW);
+
+                const normalBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, modeloArvore.normais, gl.STATIC_DRAW);
+
+                const indexBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+                gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, modeloArvore.indices, gl.STATIC_DRAW);
+
+                const aPosition = gl.getAttribLocation(programa, "aPosition");
+                gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+                gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(aPosition);
+
+                const aNormal = gl.getAttribLocation(programa, "aNormal");
+                gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
+                gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, 0, 0);
+                gl.enableVertexAttribArray(aNormal);
+
+                renderizar();
+
+                function renderizar() {
+                    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+                    const aspect = gl.canvas.width / gl.canvas.height;
+                    const projectionMatrix = criarMatrizPerspectiva(45, aspect, 0.01, 50.0);
+                    const modelViewMatrix = criarMatrizModelView();
+
+                    const uProjectionMatrix = gl.getUniformLocation(programa, "uProjectionMatrix");
+                    const uModelViewMatrix = gl.getUniformLocation(programa, "uModelViewMatrix");
+                    const uScale = gl.getUniformLocation(programa, "uScale");
+                    
+                    gl.uniformMatrix4fv(uProjectionMatrix, false, projectionMatrix);
+                    gl.uniformMatrix4fv(uModelViewMatrix, false, modelViewMatrix);
+                    gl.uniform3f(uScale, scale, scale, scale);
+
+                    gl.drawElements(gl.TRIANGLES, modeloArvore.indices.length, gl.UNSIGNED_SHORT, 0);
+                }
+
+            } catch (erro) {
+                console.error("Erro ao carregar o modelo:", erro);
+                document.getElementById('debug').innerHTML += `ERRO: ${erro.message}<br>`;
+            }
+
+            // Adicionar controles de teclado para ajuste
+            document.addEventListener('keydown', (e) => {
+                switch(e.key) {
+                    case 'ArrowUp':
+                        rotationX -= 0.1;
+                        break;
+                    case 'ArrowDown':
+                        rotationX += 0.1;
+                        break;
+                    case 'ArrowLeft':
+                        rotationY -= 0.1;
+                        break;
+                    case 'ArrowRight':
+                        rotationY += 0.1;
+                        break;
+                    case '+':
+                        scale *= 1.1;
+                        break;
+                    case '-':
+                        scale /= 1.1;
+                        break;
+                    case 'w':
+                        cameraZ += 0.1;
+                        break;
+                    case 's':
+                        cameraZ -= 0.1;
+                        break;
+                }
+                renderizar();
+                document.getElementById('debug').innerHTML += `Rotação X: ${rotationX.toFixed(2)}, Rotação Y: ${rotationY.toFixed(2)}, Escala: ${scale.toFixed(2)}, Camera Z: ${cameraZ.toFixed(2)}<br>`;
+            });
+        }
+
+        function criarPrograma() {
+            const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+            gl.shaderSource(vertexShader, document.getElementById("vertex-shader").text);
+            gl.compileShader(vertexShader);
+
+            if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
+                console.error("Erro no vertex shader:", gl.getShaderInfoLog(vertexShader));
+                return null;
+            }
+
+            const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+            gl.shaderSource(fragmentShader, document.getElementById("fragment-shader").text);
+            gl.compileShader(fragmentShader);
+
+            if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
+                console.error("Erro no fragment shader:", gl.getShaderInfoLog(fragmentShader));
+                return null;
+            }
+
+            const programa = gl.createProgram();
+            gl.attachShader(programa, vertexShader);
+            gl.attachShader(programa, fragmentShader);
+            gl.linkProgram(programa);
+
+            if (!gl.getProgramParameter(programa, gl.LINK_STATUS)) {
+                console.error("Erro ao linkar programa:", gl.getProgramInfoLog(programa));
+                return null;
+            }
+
+            return programa;
+        }
+
+        function criarMatrizPerspectiva(fovy, aspect, near, far) {
+            const f = 1.0 / Math.tan(fovy * Math.PI / 360);
+            const d = far - near;
+
+            return new Float32Array([
+                f/aspect, 0, 0, 0,
+                0, f, 0, 0,
+                0, 0, -(far+near)/d, -1,
+                0, 0, -2*far*near/d, 0
+            ]);
+        }
+
+        function criarMatrizModelView() {
+            const cosX = Math.cos(rotationX);
+            const sinX = Math.sin(rotationX);
+            const cosY = Math.cos(rotationY);
+            const sinY = Math.sin(rotationY);
+            
+            // Matriz de rotação no eixo X
+            const rotX = [
+                1,    0,     0, 0,
+                0,  cosX, -sinX, 0,
+                0,  sinX,  cosX, 0,
+                0,    0,  cameraZ, 1
+            ];
+
+            // Matriz de rotação no eixo Y
+            const rotY = [
+                cosY, 0, sinY, 0,
+                   0, 1,    0, 0,
+               -sinY, 0, cosY, 0,
+                   0, 0,    0, 1
+            ];
+
+            // Multiplicação das matrizes rotX * rotY
+            const modelView = new Float32Array(16);
+            for (let row = 0; row < 4; row++) {
+                for (let col = 0; col < 4; col++) {
+                    modelView[row * 4 + col] =
+                        rotX[row * 4 + 0] * rotY[0 * 4 + col] +
+                        rotX[row * 4 + 1] * rotY[1 * 4 + col] +
+                        rotX[row * 4 + 2] * rotY[2 * 4 + col] +
+                        rotX[row * 4 + 3] * rotY[3 * 4 + col];
+                }
+            }
+
+            return modelView;
+        }
+    </script>
+</body>
+</html>
