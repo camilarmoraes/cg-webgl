@@ -21,41 +21,48 @@
     <canvas id="webgl-canvas"></canvas>
     <div id="debug"></div>
 
-    <script type="x-shader/x-vertex" id="vertex-shader">
-        attribute vec3 aPosition;
-        attribute vec3 aNormal;
-        
-        uniform mat4 uModelViewMatrix;
+    <script type="x-shader/x-vertex" id="vertex-shader">#version 300 es
+        in vec3 aPosition;
+        in vec3 aNormal;
+        in vec2 aTextureCoord;
+
+        out vec2 vTextureCoord;
+        out vec3 vNormal;
+
         uniform mat4 uProjectionMatrix;
+        uniform mat4 uModelViewMatrix;
         uniform vec3 uScale;
-        
-        varying vec3 vNormal;
-        
+
         void main() {
             vec3 scaledPosition = aPosition * uScale;
-            vNormal = aNormal;
             gl_Position = uProjectionMatrix * uModelViewMatrix * vec4(scaledPosition, 1.0);
+            vTextureCoord = vec2(aTextureCoord.x, 1.0 - aTextureCoord.y);
+            vNormal = (uModelViewMatrix * vec4(aNormal, 0.0)).xyz;
         }
-    </script>
+</script>
 
-    <script type="x-shader/x-fragment" id="fragment-shader">
-        precision mediump float;
-        varying vec3 vNormal;
+    <script type="x-shader/x-fragment" id="fragment-shader">#version 300 es
+        precision highp float;
+        
+        in vec2 vTextureCoord;
+        in vec3 vNormal;
+        
+        uniform sampler2D uSampler;
+        
+        out vec4 fragColor;
         
         void main() {
-            vec3 light = normalize(vec3(1.0, 1.0, 1.0));
-            float intensity = max(dot(normalize(vNormal), light), 0.0);
-            vec3 color = vec3(0.2, 0.6, 0.3);
-            gl_FragColor = vec4(color * (intensity * 0.7 + 0.3), 1.0);
+            // Aplica diretamente a cor da textura sem cálculos de iluminação
+            fragColor = texture(uSampler, vTextureCoord);
         }
-    </script>
+</script>
 
     <script>
         let gl;
         let programa;
         let scale = 0.5;
-        let cameraZ = -5; // Aumentado para afastar a câmera
-        let rotationX = Math.PI / 2; // Rotação inicial de 90 graus no eixo X
+        let cameraZ = -5;
+        let rotationX = Math.PI / 2;
         let rotationY = 0;
 
         async function carregarOBJ(url) {
@@ -65,12 +72,13 @@
             const vertices = [];
             const normais = [];
             const indices = [];
+            const textureCoords = [];
             const verticesTemp = [];
             const normaisTemp = [];
+            const textureCoordsTemp = [];
             
             const linhas = texto.split('\n');
             
-            // Debug info
             document.getElementById('debug').innerHTML = `Carregando arquivo OBJ...<br>`;
             
             for (let linha of linhas) {
@@ -91,11 +99,26 @@
                         parseFloat(partes[3] || 0)
                     ]);
                 }
+                else if (partes[0] === 'vt') {
+                    textureCoordsTemp.push([
+                        parseFloat(partes[1] || 0),
+                        parseFloat(partes[2] || 0)
+                    ]);
+                }
             }
 
             if (normaisTemp.length === 0) {
                 for (let i = 0; i < verticesTemp.length; i++) {
                     normaisTemp.push([0, 1, 0]);
+                }
+            }
+
+            if (textureCoordsTemp.length === 0) {
+                for (let i = 0; i < verticesTemp.length; i++) {
+                    textureCoordsTemp.push([
+                        (i % 2),
+                        Math.floor(i / 2) % 2
+                    ]);
                 }
             }
 
@@ -110,15 +133,18 @@
                     for (let i = 1; i <= 3; i++) {
                         const verticeIndices = partes[i].split('/');
                         let verticeIndex = parseInt(verticeIndices[0]) - 1;
+                        let textureIndex = verticeIndices.length >= 2 ? parseInt(verticeIndices[1]) - 1 : verticeIndex;
                         let normalIndex = verticeIndices.length >= 3 ? parseInt(verticeIndices[2]) - 1 : verticeIndex;
 
                         verticeIndex = Math.max(0, Math.min(verticeIndex, verticesTemp.length - 1));
+                        textureIndex = Math.max(0, Math.min(textureIndex, textureCoordsTemp.length - 1));
                         normalIndex = Math.max(0, Math.min(normalIndex, normaisTemp.length - 1));
 
-                        const chave = `${verticeIndex}/${normalIndex}`;
+                        const chave = `${verticeIndex}/${textureIndex}/${normalIndex}`;
                         
                         if (!mapVertices.has(chave)) {
                             vertices.push(...verticesTemp[verticeIndex]);
+                            textureCoords.push(...textureCoordsTemp[textureIndex]);
                             normais.push(...normaisTemp[normalIndex]);
                             mapVertices.set(chave, indexVerticeAtual);
                             indices.push(indexVerticeAtual);
@@ -130,40 +156,37 @@
                 }
             }
 
-            if (vertices.length === 0) {
-                throw new Error("Nenhum vértice encontrado no arquivo OBJ");
-            }
+            const maxDim = Math.max(
+                Math.max(...vertices) - Math.min(...vertices),
+                Math.max(...normais) - Math.min(...normais)
+            );
+            scale = 2.0 / maxDim;
 
-            // Encontrar limites do modelo
-            let minX = Infinity, maxX = -Infinity;
-            let minY = Infinity, maxY = -Infinity;
-            let minZ = Infinity, maxZ = -Infinity;
-
-            for (let i = 0; i < vertices.length; i += 3) {
-                minX = Math.min(minX, vertices[i]);
-                maxX = Math.max(maxX, vertices[i]);
-                minY = Math.min(minY, vertices[i + 1]);
-                maxY = Math.max(maxY, vertices[i + 1]);
-                minZ = Math.min(minZ, vertices[i + 2]);
-                maxZ = Math.max(maxZ, vertices[i + 2]);
-            }
-
-            // Calcular escala apropriada
-            const width = maxX - minX;
-            const height = maxY - minY;
-            const depth = maxZ - minZ;
-            const maxDim = Math.max(width, height, depth);
-            scale = 2.0 / maxDim; // Ajusta o modelo para caber em um cubo 2x2
-
-            // Debug info
-            document.getElementById('debug').innerHTML += `Dimensões: ${width.toFixed(2)} x ${height.toFixed(2)} x ${depth.toFixed(2)}<br>`;
-            document.getElementById('debug').innerHTML += `Escala automática: ${scale.toFixed(2)}<br>`;
-            
             return {
                 vertices: new Float32Array(vertices),
                 normais: new Float32Array(normais),
-                indices: new Uint16Array(indices)
+                indices: new Uint16Array(indices),
+                textureCoords: new Float32Array(textureCoords)
             };
+        }
+
+        function carregarTextura(url) {
+            return new Promise((resolve) => {
+                const texture = gl.createTexture();
+                const image = new Image();
+                image.onload = function() {
+                    gl.bindTexture(gl.TEXTURE_2D, texture);
+                    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+                    gl.generateMipmap(gl.TEXTURE_2D);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                    resolve(texture);
+                };
+                image.src = url;
+            });
         }
 
         async function iniciar() {
@@ -171,101 +194,105 @@
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
             
-            gl = canvas.getContext("webgl");
+            gl = canvas.getContext("webgl2");
             if (!gl) {
-                alert("WebGL não está disponível");
+                alert("WebGL2 não está disponível");
                 return;
             }
 
             gl.clearColor(0.8, 0.9, 1.0, 1.0);
             gl.enable(gl.DEPTH_TEST);
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
             gl.viewport(0, 0, canvas.width, canvas.height);
 
             programa = criarPrograma();
             gl.useProgram(programa);
 
             try {
-                const modeloArvore = await carregarOBJ('batarang.obj');
-                console.log("Modelo carregado:", modeloArvore);
+                const modeloObj = await carregarOBJ('batarang.obj');
+                const textura = await carregarTextura('flat-lay-metal-surface.jpg');
+
+                const vao = gl.createVertexArray();
+                gl.bindVertexArray(vao);
 
                 const vertexBuffer = gl.createBuffer();
                 gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, modeloArvore.vertices, gl.STATIC_DRAW);
+                gl.bufferData(gl.ARRAY_BUFFER, modeloObj.vertices, gl.STATIC_DRAW);
+                const aPosition = gl.getAttribLocation(programa, "aPosition");
+                gl.enableVertexAttribArray(aPosition);
+                gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
+
 
                 const normalBuffer = gl.createBuffer();
                 gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, modeloArvore.normais, gl.STATIC_DRAW);
+                gl.bufferData(gl.ARRAY_BUFFER, modeloObj.normais, gl.STATIC_DRAW);
+                const aNormal = gl.getAttribLocation(programa, "aNormal");
+                gl.enableVertexAttribArray(aNormal);
+                gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, 0, 0);
+
+                const textureBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, textureBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, modeloObj.textureCoords, gl.STATIC_DRAW);
+                const aTextureCoord = gl.getAttribLocation(programa, "aTextureCoord");
+                gl.enableVertexAttribArray(aTextureCoord);
+                gl.vertexAttribPointer(aTextureCoord, 2, gl.FLOAT, false, 0, 0);
 
                 const indexBuffer = gl.createBuffer();
                 gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-                gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, modeloArvore.indices, gl.STATIC_DRAW);
-
-                const aPosition = gl.getAttribLocation(programa, "aPosition");
-                gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-                gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
-                gl.enableVertexAttribArray(aPosition);
-
-                const aNormal = gl.getAttribLocation(programa, "aNormal");
-                gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
-                gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, 0, 0);
-                gl.enableVertexAttribArray(aNormal);
-
-                renderizar();
+                gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, modeloObj.indices, gl.STATIC_DRAW);
 
                 function renderizar() {
                     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
                     const aspect = gl.canvas.width / gl.canvas.height;
-                    const projectionMatrix = criarMatrizPerspectiva(45, aspect, 0.01, 50.0);
+                    const projectionMatrix = criarMatrizPerspectiva(45, aspect, 0.1, 100.0);
                     const modelViewMatrix = criarMatrizModelView();
 
-                    const uProjectionMatrix = gl.getUniformLocation(programa, "uProjectionMatrix");
-                    const uModelViewMatrix = gl.getUniformLocation(programa, "uModelViewMatrix");
-                    const uScale = gl.getUniformLocation(programa, "uScale");
-                    
-                    gl.uniformMatrix4fv(uProjectionMatrix, false, projectionMatrix);
-                    gl.uniformMatrix4fv(uModelViewMatrix, false, modelViewMatrix);
-                    gl.uniform3f(uScale, scale, scale, scale);
+                    gl.uniformMatrix4fv(
+                        gl.getUniformLocation(programa, "uProjectionMatrix"),
+                        false,
+                        projectionMatrix
+                    );
+                    gl.uniformMatrix4fv(
+                        gl.getUniformLocation(programa, "uModelViewMatrix"),
+                        false,
+                        modelViewMatrix
+                    );
+                    gl.uniform3f(
+                        gl.getUniformLocation(programa, "uScale"),
+                        scale, scale, scale
+                    );
 
-                    gl.drawElements(gl.TRIANGLES, modeloArvore.indices.length, gl.UNSIGNED_SHORT, 0);
+                    gl.activeTexture(gl.TEXTURE0);
+                    gl.bindTexture(gl.TEXTURE_2D, textura);
+                    gl.uniform1i(gl.getUniformLocation(programa, "uSampler"), 0);
+
+                    gl.bindVertexArray(vao);
+                    gl.drawElements(gl.TRIANGLES, modeloObj.indices.length, gl.UNSIGNED_SHORT, 0);
+
+                    requestAnimationFrame(renderizar);
                 }
+
+                renderizar();
+
+                document.addEventListener('keydown', (e) => {
+                    switch(e.key) {
+                        case 'ArrowUp': rotationX -= 0.1; break;
+                        case 'ArrowDown': rotationX += 0.1; break;
+                        case 'ArrowLeft': rotationY -= 0.1; break;
+                        case 'ArrowRight': rotationY += 0.1; break;
+                        case '+': scale *= 1.1; break;
+                        case '-': scale /= 1.1; break;
+                        case 'w': cameraZ += 0.1; break;
+                        case 's': cameraZ -= 0.1; break;
+                    }
+                });
 
             } catch (erro) {
                 console.error("Erro ao carregar o modelo:", erro);
                 document.getElementById('debug').innerHTML += `ERRO: ${erro.message}<br>`;
             }
-
-            // Adicionar controles de teclado para ajuste
-            document.addEventListener('keydown', (e) => {
-                switch(e.key) {
-                    case 'ArrowUp':
-                        rotationX -= 0.1;
-                        break;
-                    case 'ArrowDown':
-                        rotationX += 0.1;
-                        break;
-                    case 'ArrowLeft':
-                        rotationY -= 0.1;
-                        break;
-                    case 'ArrowRight':
-                        rotationY += 0.1;
-                        break;
-                    case '+':
-                        scale *= 1.1;
-                        break;
-                    case '-':
-                        scale /= 1.1;
-                        break;
-                    case 'w':
-                        cameraZ += 0.1;
-                        break;
-                    case 's':
-                        cameraZ -= 0.1;
-                        break;
-                }
-                renderizar();
-                document.getElementById('debug').innerHTML += `Rotação X: ${rotationX.toFixed(2)}, Rotação Y: ${rotationY.toFixed(2)}, Escala: ${scale.toFixed(2)}, Camera Z: ${cameraZ.toFixed(2)}<br>`;
-            });
         }
 
         function criarPrograma() {
