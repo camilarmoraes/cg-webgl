@@ -36,7 +36,7 @@
         void main() {
             vec3 scaledPosition = aPosition * uScale;
             gl_Position = uProjectionMatrix * uModelViewMatrix * vec4(scaledPosition, 1.0);
-            vTextureCoord = vec2(aTextureCoord.x, 1.0 - aTextureCoord.y);
+            vTextureCoord = aTextureCoord;
             vNormal = (uModelViewMatrix * vec4(aNormal, 0.0)).xyz;
         }
 </script>
@@ -48,11 +48,9 @@
         in vec3 vNormal;
         
         uniform sampler2D uSampler;
-        
         out vec4 fragColor;
         
         void main() {
-            // Aplica diretamente a cor da textura sem cálculos de iluminação
             fragColor = texture(uSampler, vTextureCoord);
         }
 </script>
@@ -61,9 +59,10 @@
         let gl;
         let programa;
         let scale = 0.5;
-        let cameraZ = -5;
-        let rotationX = Math.PI / 2;
+        let cameraZ = -3;
+        let rotationX = -Math.PI / 2;
         let rotationY = 0;
+        let rotationZ = 0;
 
         async function carregarOBJ(url) {
             const response = await fetch(url);
@@ -77,20 +76,30 @@
             const normaisTemp = [];
             const textureCoordsTemp = [];
             
+            let minVertex = [Infinity, Infinity, Infinity];
+            let maxVertex = [-Infinity, -Infinity, -Infinity];
+
             const linhas = texto.split('\n');
             
-            document.getElementById('debug').innerHTML = `Carregando arquivo OBJ...<br>`;
+            // document.getElementById('debug').innerHTML = `Campo para o debug...<br>`;
             
             for (let linha of linhas) {
                 linha = linha.trim();
                 const partes = linha.split(/\s+/);
                 
                 if (partes[0] === 'v') {
-                    verticesTemp.push([
+                    const vertex = [
                         parseFloat(partes[1] || 0),
                         parseFloat(partes[2] || 0),
                         parseFloat(partes[3] || 0)
-                    ]);
+                    ];
+                    verticesTemp.push(vertex);
+                    
+                    // Atualizar limites
+                    for (let i = 0; i < 3; i++) {
+                        minVertex[i] = Math.min(minVertex[i], vertex[i]);
+                        maxVertex[i] = Math.max(maxVertex[i], vertex[i]);
+                    }
                 }
                 else if (partes[0] === 'vn') {
                     normaisTemp.push([
@@ -102,7 +111,8 @@
                 else if (partes[0] === 'vt') {
                     textureCoordsTemp.push([
                         parseFloat(partes[1] || 0),
-                        parseFloat(partes[2] || 0)
+                        parseFloat(partes[2] || 0),
+                        // parseFloat(partes[3] || 0),
                     ]);
                 }
             }
@@ -114,11 +124,15 @@
             }
 
             if (textureCoordsTemp.length === 0) {
+                const rangeX = maxVertex[0] - minVertex[0];
+                const rangeZ = maxVertex[2] - minVertex[2];
+                
                 for (let i = 0; i < verticesTemp.length; i++) {
-                    textureCoordsTemp.push([
-                        (i % 2),
-                        Math.floor(i / 2) % 2
-                    ]);
+                    const vertex = verticesTemp[i];
+                    // Normalizar coordenadas entre 0 e 1
+                    const u = (vertex[0] - minVertex[0]) / rangeX;
+                    const v = (vertex[2] - minVertex[2]) / rangeZ;
+                    textureCoordsTemp.push([u, v]);
                 }
             }
 
@@ -130,15 +144,16 @@
                 const partes = linha.split(/\s+/);
                 
                 if (partes[0] === 'f') {
+                    if (partes.length < 4) continue;
                     for (let i = 1; i <= 3; i++) {
-                        const verticeIndices = partes[i].split('/');
+                        const verticeIndices = partes[i].split('/');                        
                         let verticeIndex = parseInt(verticeIndices[0]) - 1;
-                        let textureIndex = verticeIndices.length >= 2 ? parseInt(verticeIndices[1]) - 1 : verticeIndex;
-                        let normalIndex = verticeIndices.length >= 3 ? parseInt(verticeIndices[2]) - 1 : verticeIndex;
+                        let textureIndex = verticeIndices[1] ? parseInt(verticeIndices[1]) - 1 : -1;
+                        let normalIndex = verticeIndices[2] ? parseInt(verticeIndices[2]) - 1 : -1;
 
                         verticeIndex = Math.max(0, Math.min(verticeIndex, verticesTemp.length - 1));
-                        textureIndex = Math.max(0, Math.min(textureIndex, textureCoordsTemp.length - 1));
-                        normalIndex = Math.max(0, Math.min(normalIndex, normaisTemp.length - 1));
+                        textureIndex = textureIndex >= 0 ? Math.min(textureIndex, textureCoordsTemp.length - 1) : verticeIndex;
+                        normalIndex = normalIndex >= 0 ? Math.min(normalIndex, normaisTemp.length - 1) : verticeIndex;
 
                         const chave = `${verticeIndex}/${textureIndex}/${normalIndex}`;
                         
@@ -157,8 +172,9 @@
             }
 
             const maxDim = Math.max(
-                Math.max(...vertices) - Math.min(...vertices),
-                Math.max(...normais) - Math.min(...normais)
+                maxVertex[0] - minVertex[0],
+                maxVertex[1] - minVertex[1],
+                maxVertex[2] - minVertex[2]
             );
             scale = 2.0 / maxDim;
 
@@ -176,13 +192,23 @@
                 const image = new Image();
                 image.onload = function() {
                     gl.bindTexture(gl.TEXTURE_2D, texture);
-                    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, image);
                     gl.generateMipmap(gl.TEXTURE_2D);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
                     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.MIRRORED_REPEAT);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+                    // Suporte a filtro anisotrópico
+                    const ext = gl.getExtension("EXT_texture_filter_anisotropic") ||
+                                gl.getExtension("MOZ_EXT_texture_filter_anisotropic") ||
+                                gl.getExtension("WEBKIT_EXT_texture_filter_anisotropic");
+                    if (ext) {
+                        const max = gl.getParameter(ext.MAX_TEXTURE_MAX_ANISOTROPY_EXT);
+                        gl.texParameterf(gl.TEXTURE_2D, ext.TEXTURE_MAX_ANISOTROPY_EXT, max);
+                    }
                     resolve(texture);
                 };
                 image.src = url;
@@ -200,7 +226,7 @@
                 return;
             }
 
-            gl.clearColor(0.8, 0.9, 1.0, 1.0);
+            gl.clearColor(1.0, 1.0, 1.0, 1.0);
             gl.enable(gl.DEPTH_TEST);
             gl.enable(gl.BLEND);
             gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -211,7 +237,7 @@
 
             try {
                 const modeloObj = await carregarOBJ('batarang.obj');
-                const textura = await carregarTextura('flat-lay-metal-surface.jpg');
+                const textura = await carregarTextura('gray-smooth-textured-design.jpg');
 
                 const vao = gl.createVertexArray();
                 gl.bindVertexArray(vao);
@@ -282,6 +308,8 @@
                         case 'ArrowDown': rotationX += 0.1; break;
                         case 'ArrowLeft': rotationY -= 0.1; break;
                         case 'ArrowRight': rotationY += 0.1; break;
+                        case 'a': rotationZ -= 0.1; break; // Rotação no eixo Z (sentido horário)
+                        case 'd': rotationZ += 0.1; break; // Rotação no eixo Z (sentido anti-horário)
                         case '+': scale *= 1.1; break;
                         case '-': scale /= 1.1; break;
                         case 'w': cameraZ += 0.1; break;
@@ -344,34 +372,70 @@
             const sinX = Math.sin(rotationX);
             const cosY = Math.cos(rotationY);
             const sinY = Math.sin(rotationY);
-            
+            const cosZ = Math.cos(rotationZ);
+            const sinZ = Math.sin(rotationZ);
+
             // Matriz de rotação no eixo X
             const rotX = [
                 1,    0,     0, 0,
                 0,  cosX, -sinX, 0,
                 0,  sinX,  cosX, 0,
-                0,    0,  cameraZ, 1
+                0,    0,     0, 1
             ];
 
             // Matriz de rotação no eixo Y
             const rotY = [
                 cosY, 0, sinY, 0,
-                   0, 1,    0, 0,
-               -sinY, 0, cosY, 0,
-                   0, 0,    0, 1
+                0, 1,    0, 0,
+            -sinY, 0, cosY, 0,
+                0, 0,    0, 1
             ];
 
-            // Multiplicação das matrizes rotX * rotY
+            // Matriz de rotação no eixo Z
+            const rotZ = [
+                cosZ, -sinZ, 0, 0,
+                sinZ,  cosZ, 0, 0,
+                0,     0, 1, 0,
+                0,     0, 0, 1
+            ];
+
+            // Multiplicação das matrizes: rotX * rotY * rotZ
+            const temp = new Float32Array(16);
             const modelView = new Float32Array(16);
+
+            // Multiplica rotX * rotY e armazena em temp
             for (let row = 0; row < 4; row++) {
                 for (let col = 0; col < 4; col++) {
-                    modelView[row * 4 + col] =
+                    temp[row * 4 + col] =
                         rotX[row * 4 + 0] * rotY[0 * 4 + col] +
                         rotX[row * 4 + 1] * rotY[1 * 4 + col] +
                         rotX[row * 4 + 2] * rotY[2 * 4 + col] +
                         rotX[row * 4 + 3] * rotY[3 * 4 + col];
                 }
             }
+
+            // Multiplica temp * rotZ e armazena em modelView
+            for (let row = 0; row < 4; row++) {
+                for (let col = 0; col < 4; col++) {
+                    modelView[row * 4 + col] =
+                        temp[row * 4 + 0] * rotZ[0 * 4 + col] +
+                        temp[row * 4 + 1] * rotZ[1 * 4 + col] +
+                        temp[row * 4 + 2] * rotZ[2 * 4 + col] +
+                        temp[row * 4 + 3] * rotZ[3 * 4 + col];
+                }
+            }
+
+            // Aplica a translação da câmera (cameraZ)
+            modelView[14] = cameraZ;
+
+            // Adiciona uma translação inicial (opcional)
+            const translateX = 0; // Ajuste para mover o objeto no eixo X
+            const translateY = 0; // Ajuste para mover o objeto no eixo Y
+            const translateZ = 0; // Ajuste para mover o objeto no eixo Z
+
+            modelView[12] = translateX;
+            modelView[13] = translateY;
+            modelView[14] += translateZ;
 
             return modelView;
         }
